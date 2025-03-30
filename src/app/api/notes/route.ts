@@ -1,53 +1,64 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
-interface FileNode {
-  name: string;
-  path: string;
-  type: "file" | "directory";
-  children?: FileNode[];
-}
+// Define the path to the notes directory
+const notesDir = path.join(process.cwd(), "notes");
 
-function buildFileTree(dirPath: string, relativePath: string = ""): FileNode[] {
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  const nodes: FileNode[] = [];
+async function readDir(dirPath: string, basePath: string = ""): Promise<any[]> {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  const nodes = [];
 
-  entries.forEach((entry) => {
+  // Try to read the metadata file to get the order
+  let order: string[] = [];
+  try {
+    const metadataPath = path.join(notesDir, ".metadata.json");
+    const metadataContent = await fs.readFile(metadataPath, "utf-8");
+    const metadata = JSON.parse(metadataContent);
+    order = metadata.order || [];
+  } catch (error) {
+    // If metadata file doesn't exist or is invalid, continue without order
+    console.log("No metadata file found, using default order");
+  }
+
+  // Create a map for order lookup
+  const orderMap = new Map(order.map((item, index) => [item, index]));
+
+  for (const entry of entries) {
+    const nodePath = path.join(basePath, entry.name);
     const fullPath = path.join(dirPath, entry.name);
-    const relativeNodePath = path.join(relativePath, entry.name);
 
     if (entry.isDirectory()) {
-      nodes.push({
-        name: entry.name,
-        path: relativeNodePath,
-        type: "directory",
-        children: buildFileTree(fullPath, relativeNodePath),
-      });
+      const children = await readDir(fullPath, nodePath);
+      if (children.length > 0) {
+        nodes.push({
+          name: entry.name,
+          path: nodePath,
+          type: "directory",
+          children,
+        });
+      }
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
       nodes.push({
         name: entry.name,
-        path: relativeNodePath,
+        path: nodePath,
         type: "file",
       });
     }
-  });
+  }
 
+  // Sort nodes based on the order map
   return nodes.sort((a, b) => {
-    // Directories come before files
-    if (a.type !== b.type) {
-      return a.type === "directory" ? -1 : 1;
-    }
-    // Alphabetical order
-    return a.name.localeCompare(b.name);
+    const orderA = orderMap.get(a.path) ?? Number.MAX_SAFE_INTEGER;
+    const orderB = orderMap.get(b.path) ?? Number.MAX_SAFE_INTEGER;
+    return orderA - orderB;
   });
 }
 
 export async function GET() {
   try {
-    const notesDir = path.join(process.cwd(), "notes");
-    const fileTree = buildFileTree(notesDir);
-    return NextResponse.json(fileTree);
+    const tree = await readDir(notesDir);
+    return NextResponse.json(tree);
   } catch (error) {
     console.error("Error reading notes directory:", error);
     return NextResponse.json(

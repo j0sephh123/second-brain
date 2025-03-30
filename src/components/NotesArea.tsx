@@ -12,12 +12,29 @@ import {
   ArrowDownTrayIcon,
   PencilIcon,
   TrashIcon,
+  EyeIcon,
+  EyeSlashIcon,
 } from "@heroicons/react/24/outline";
 import path from "path";
 import { useToast } from "@/hooks/useToast";
 import ConfirmModal from "./ConfirmModal";
 import RenameModal from "./RenameModal";
 import NewNoteModal from "./NewNoteModal";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import {
+  DndContext,
+  rectIntersection,
+  closestCenter,
+  pointerWithin,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDroppable,
+} from "@dnd-kit/core";
+import DraggableNoteItem from "./DraggableNoteItem";
 
 interface FileNode {
   name: string;
@@ -51,6 +68,17 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
 
     const [editorContent, setEditorContent] = useState<string>("");
     const [hasChanges, setHasChanges] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
+
+    // Configure sensors for drag and drop
+    const sensors = useSensors(
+      useSensor(PointerSensor, {
+        activationConstraint: {
+          distance: 5, // Only start dragging after moving 5px - helps with accidental drags
+        },
+      }),
+      useSensor(KeyboardSensor)
+    );
 
     const fetchFileTree = useCallback(async () => {
       setIsLoadingTree(true);
@@ -172,7 +200,11 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
 
     const handleSaveNote = async () => {
       if (!selectedNote) {
-        alert("No note selected to save.");
+        toast({
+          title: "Error",
+          description: "No note selected to save.",
+          variant: "destructive",
+        });
         return;
       }
       setIsSaving(true);
@@ -191,21 +223,36 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         if (!response.ok) {
           throw new Error(result.error || `HTTP error! ${response.status}`);
         }
-        alert("Note saved successfully!");
+        toast({
+          title: "Success",
+          description: "Note saved successfully!",
+          variant: "success",
+        });
         setHasChanges(false);
       } catch (error: unknown) {
         console.error("Error saving note:", error);
-        alert(
-          `Error saving note: ${
+        toast({
+          title: "Error",
+          description: `Error saving note: ${
             error instanceof Error ? error.message : String(error)
-          }`
-        );
+          }`,
+          variant: "destructive",
+        });
       } finally {
         setIsSaving(false);
       }
     };
 
-    const handleRename = async (oldPath: string, newPath: string) => {
+    const handleRename = async (oldPath: string, newName: string) => {
+      // Ensure the new name has .md extension if it's missing
+      const finalNewName = newName.endsWith(".md") ? newName : `${newName}.md`;
+      const newPath = oldPath.replace(/[^/]+$/, finalNewName);
+
+      if (oldPath === newPath) {
+        setNoteToRename(null); // Close modal if name didn't change
+        return;
+      }
+
       try {
         const response = await fetch("/api/notes/rename", {
           method: "POST",
@@ -213,8 +260,10 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
           body: JSON.stringify({ oldPath, newPath }),
         });
 
+        const result = await response.json();
+
         if (!response.ok) {
-          throw new Error("Failed to rename note");
+          throw new Error(result.error || "Failed to rename note");
         }
 
         await fetchFileTree();
@@ -223,20 +272,27 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
           title: "Success",
           description: "Note renamed successfully",
         });
-      } catch (error) {
+        // Update selected note if it was the one renamed
+        if (selectedNote === oldPath) {
+          setSelectedNote(newPath);
+        }
+      } catch (error: unknown) {
         console.error("Error renaming note:", error);
         toast({
           title: "Error",
-          description: "Failed to rename note",
+          description: `Failed to rename note: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
           variant: "destructive",
         });
+      } finally {
+        setNoteToRename(null); // Ensure modal closes even on error
       }
     };
 
     const handleConfirmRename = (newName: string) => {
       if (!noteToRename) return;
-      const newPath = noteToRename.path.replace(/[^/]+$/, newName);
-      handleRename(noteToRename.path, newPath);
+      handleRename(noteToRename.path, newName);
     };
 
     const handleDelete = async (path: string) => {
@@ -247,31 +303,44 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
       if (!noteToDelete) return;
 
       try {
+        // Find the item in the file tree to know its type
+        const isFolder =
+          findNodeTypeInTree(fileTree, noteToDelete) === "directory";
+
         const response = await fetch("/api/notes/delete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ path: noteToDelete }),
         });
 
+        const result = await response.json();
         if (!response.ok) {
-          throw new Error("Failed to delete note");
+          throw new Error(result.error || "Failed to delete");
         }
 
         await fetchFileTree();
-        if (selectedNote === noteToDelete) {
+        if (
+          selectedNote === noteToDelete ||
+          (selectedNote && selectedNote.startsWith(noteToDelete + "/"))
+        ) {
+          // If selected note is the deleted one or is inside the deleted folder
           setSelectedNote(null);
           setEditorContent("");
         }
         toast({
           title: "Success",
-          description: "Note deleted successfully",
+          description: isFolder
+            ? "Folder deleted successfully"
+            : "Note deleted successfully",
           variant: "success",
         });
-      } catch (error) {
-        console.error("Error deleting note:", error);
+      } catch (error: unknown) {
+        console.error("Error deleting:", error);
         toast({
           title: "Error",
-          description: "Failed to delete note",
+          description: `Failed to delete: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
           variant: "destructive",
         });
       } finally {
@@ -279,69 +348,163 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
       }
     };
 
+    // Helper function to find a node's type in the file tree
+    const findNodeTypeInTree = (
+      nodes: FileNode[],
+      targetPath: string
+    ): "file" | "directory" | null => {
+      for (const node of nodes) {
+        if (node.path === targetPath) {
+          return node.type;
+        }
+        if (node.children) {
+          const found = findNodeTypeInTree(node.children, targetPath);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+
+    // Handle drag end
+    const handleDragEnd = async (event: any) => {
+      const { active, over } = event;
+
+      console.log("Drag End Event:", event);
+      console.log("Active:", active);
+      console.log("Over:", over);
+
+      // If dropped outside a droppable area (folder)
+      if (!over) {
+        console.log("Dropped outside any droppable area.");
+        return;
+      }
+
+      const activeId = active.id as string; // Path of the dragged item (should be a file)
+      const overId = over.id as string; // Path of the drop target (folder)
+
+      console.log(`Attempting Drag: activeId=${activeId}, overId=${overId}`);
+      console.log("Over Data:", over.data?.current);
+      console.log("Active Data:", active.data?.current);
+
+      // Cannot drop on self
+      if (activeId === overId) {
+        console.log("Cannot drop on self.");
+        return;
+      }
+
+      // Check if dragging a file (we only support dragging files)
+      if (active.data.current?.type !== "file") {
+        console.log("Cannot drag item of type:", active.data.current?.type);
+        return;
+      }
+
+      // Check if target is a folder
+      const isOverFolder = over.data.current?.type === "directory";
+      if (!isOverFolder) {
+        console.log("Invalid drop target (not a folder).");
+        return; // Only allow dropping onto folders
+      }
+
+      const targetFolder = overId;
+      console.log(`Target is FOLDER: ${targetFolder}`);
+
+      // Check if trying to drop into the same parent folder
+      const activeParentPath = path.dirname(activeId);
+      console.log(
+        `File's parent folder: ${activeParentPath}, Target folder: ${targetFolder}`
+      );
+
+      if (activeParentPath === targetFolder) {
+        console.log("Cannot drop into the same folder as source.");
+        toast({
+          title: "Invalid Drop",
+          description: "Cannot move a file to the folder it's already in",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      try {
+        console.log(`Moving file: ${activeId} to target: ${targetFolder}`);
+
+        const response = await fetch("/api/notes/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourcePath: activeId, // The file being dragged
+            targetFolder: targetFolder, // The folder path
+          }),
+        });
+
+        // Log the raw response for debugging
+        const responseText = await response.text();
+        console.log("Raw API response:", responseText);
+
+        // Parse the response as JSON
+        let result;
+        try {
+          result = JSON.parse(responseText);
+        } catch (e) {
+          console.error("Failed to parse response as JSON:", e);
+          throw new Error("Invalid response format from server");
+        }
+
+        if (!response.ok) {
+          // Use error message from API if available
+          throw new Error(result.error || "Failed to move note");
+        }
+
+        setFileTree(result.tree); // Update tree from response
+        toast({
+          title: "Success",
+          description: result.message || "Note moved successfully",
+        });
+
+        // Update selection if the moved note was selected
+        if (selectedNote === activeId) {
+          const baseName = path.basename(activeId);
+          const newPath = path.join(targetFolder, baseName);
+          console.log(
+            `Updating selected note from ${selectedNote} to ${newPath}`
+          );
+          setSelectedNote(newPath);
+          // No need to fetch content again, editor state persists unless component remounts
+        }
+      } catch (error: unknown) {
+        console.error("Error moving note:", error);
+        toast({
+          title: "Error",
+          description: `Failed to move note: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          variant: "destructive",
+        });
+      }
+    };
+
     const renderFileTree = (nodes: FileNode[], level: number = 0) => {
       return nodes.map((node) => (
-        <div key={node.path} style={{ marginLeft: `${level * 1.5}rem` }}>
-          {node.type === "directory" ? (
-            <div className="flex items-center gap-1 text-gray-600 dark:text-gray-300 py-1">
-              <FolderIcon className="h-4 w-4" />
-              <span>{node.name}</span>
-            </div>
-          ) : (
-            <div
-              className={`py-1 px-2 rounded ${
-                selectedNote === node.path
-                  ? "bg-blue-100 dark:bg-blue-900"
-                  : "hover:bg-gray-100 dark:hover:bg-gray-700"
-              }`}
-            >
-              {renderNoteItem(node)}
-            </div>
-          )}
+        <div key={node.path} style={{ paddingLeft: `${level * 1.5}rem` }}>
+          <DraggableNoteItem
+            note={node}
+            selectedNote={selectedNote}
+            onNoteClick={handleFileClick}
+            onRename={setNoteToRename}
+            onDelete={handleDelete}
+          />
           {node.children && renderFileTree(node.children, level + 1)}
         </div>
       ));
     };
 
-    const renderNoteItem = (note: FileNode) => {
-      const displayName = note.name.replace(/\.md$/, "");
-      return (
-        <div className="group flex items-center justify-between w-full">
-          <button
-            onClick={() => handleFileClick(note.path)}
-            className="flex-1 text-left hover:text-blue-500 dark:hover:text-blue-400 text-sm"
-          >
-            {displayName}
-          </button>
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setNoteToRename({ path: note.path, name: note.name });
-              }}
-              className="p-1 text-gray-500 hover:text-blue-500 dark:text-gray-400 dark:hover:text-blue-400"
-            >
-              <PencilIcon className="h-3 w-3" />
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDelete(note.path);
-              }}
-              className="p-1 text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400"
-            >
-              <TrashIcon className="h-3 w-3" />
-            </button>
-          </div>
-        </div>
-      );
-    };
-
     return (
       <div className="flex h-full">
-        {/* File Tree */}
-        <div className="w-1/3 border-r border-gray-200 dark:border-gray-700 overflow-y-auto p-4 flex flex-col">
+        {/* File Tree Pane */}
+        <div className="w-1/3 border-r border-gray-200 dark:border-gray-700 p-4 flex flex-col relative">
           <div className="flex items-center justify-between mb-4 flex-shrink-0">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              Notes
+            </h2>
             <button
               onClick={handleCreateNewNote}
               className="text-sm bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 disabled:opacity-50"
@@ -350,19 +513,26 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
               New Note
             </button>
           </div>
-          <div className="flex-grow overflow-y-auto">
-            {isLoadingTree ? (
-              <p className="text-gray-500 dark:text-gray-400 animate-pulse">
-                Loading notes...
-              </p>
-            ) : fileTree.length > 0 ? (
-              renderFileTree(fileTree)
-            ) : (
-              <p className="text-gray-500 dark:text-gray-400 text-sm">
-                No notes found in ./notes
-              </p>
-            )}
-          </div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
+            {/* Container for the File Tree */}
+            <div className="flex-grow overflow-y-auto">
+              {isLoadingTree ? (
+                <p className="text-gray-500 dark:text-gray-400 animate-pulse px-2">
+                  Loading notes...
+                </p>
+              ) : fileTree.length > 0 ? (
+                renderFileTree(fileTree)
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500 dark:text-gray-400 text-sm">
+                  No notes yet. Create one using the "New Note" button.
+                </div>
+              )}
+            </div>
+          </DndContext>
         </div>
 
         {/* Editor Area */}
@@ -376,26 +546,50 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
                 >
                   {path.basename(selectedNote).replace(/\.md$/, "")}
                 </h3>
-                <button
-                  onClick={handleSaveNote}
-                  disabled={!hasChanges || isSaving}
-                  className={`flex items-center gap-1 text-sm px-3 py-1 rounded ${
-                    !hasChanges || isSaving
-                      ? "bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed"
-                      : "bg-green-500 dark:bg-green-600 text-white hover:bg-green-600 dark:hover:bg-green-700"
-                  }`}
-                >
-                  <ArrowDownTrayIcon className="h-4 w-4" />
-                  {isSaving ? "Saving..." : "Save Note"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsEditing(!isEditing)}
+                    title={isEditing ? "Preview Note" : "Edit Note"}
+                    className="p-2 text-gray-500 hover:text-blue-500 dark:text-gray-400 dark:hover:text-blue-400 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    {isEditing ? (
+                      <EyeIcon className="h-5 w-5" />
+                    ) : (
+                      <EyeSlashIcon className="h-5 w-5" />
+                    )}
+                  </button>
+                  <button
+                    onClick={handleSaveNote}
+                    disabled={!hasChanges || isSaving}
+                    className={`flex items-center gap-1 text-sm px-3 py-1 rounded ${
+                      !hasChanges || isSaving
+                        ? "bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed"
+                        : "bg-green-500 dark:bg-green-600 text-white hover:bg-green-600 dark:hover:bg-green-700"
+                    }`}
+                  >
+                    <ArrowDownTrayIcon className="h-4 w-4" />
+                    {isSaving ? "Saving..." : "Save Note"}
+                  </button>
+                </div>
               </div>
-              <textarea
-                key={selectedNote}
-                value={editorContent}
-                onChange={handleEditorChange}
-                placeholder="Start writing your note..."
-                className="w-full h-full flex-grow p-3 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none font-mono text-sm"
-              />
+              {isEditing ? (
+                <textarea
+                  key={selectedNote}
+                  value={editorContent}
+                  onChange={handleEditorChange}
+                  placeholder="Start writing your note..."
+                  className="w-full h-full flex-grow p-3 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none font-mono text-sm"
+                />
+              ) : (
+                <div className="w-full h-full flex-grow p-3 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 overflow-y-auto prose dark:prose-invert max-w-none">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeRaw]}
+                  >
+                    {editorContent}
+                  </ReactMarkdown>
+                </div>
+              )}
             </>
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500 dark:text-gray-400">
@@ -409,8 +603,23 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
           isOpen={noteToDelete !== null}
           onClose={() => setNoteToDelete(null)}
           onConfirm={handleConfirmDelete}
-          title="Delete Note"
-          message="Are you sure you want to delete this note? This action cannot be undone."
+          title={
+            noteToDelete &&
+            findNodeTypeInTree(fileTree, noteToDelete) === "directory"
+              ? "Delete Folder"
+              : "Delete Note"
+          }
+          message={
+            noteToDelete
+              ? `Are you sure you want to delete "${path.basename(
+                  noteToDelete
+                )}"?${
+                  findNodeTypeInTree(fileTree, noteToDelete) === "directory"
+                    ? " This will delete the folder and ALL its contents."
+                    : ""
+                } This action cannot be undone.`
+              : ""
+          }
           confirmText="Delete"
           cancelText="Cancel"
         />
@@ -420,7 +629,11 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
           isOpen={noteToRename !== null}
           onClose={() => setNoteToRename(null)}
           onConfirm={handleConfirmRename}
-          currentName={noteToRename?.name || ""}
+          currentName={
+            noteToRename
+              ? path.basename(noteToRename.name).replace(/\\.md$/, "")
+              : ""
+          }
         />
 
         {/* New Note Modal */}

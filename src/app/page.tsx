@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback } from "react";
 import ChatInterface from "@/components/ChatInterface";
 import NotesArea, { NotesAreaRef } from "@/components/NotesArea";
-import VisualizationArea from "@/components/VisualizationArea";
+import Link from "next/link";
 
 export default function Home() {
   // State for the currently selected note filename
@@ -22,7 +22,7 @@ export default function Home() {
   return (
     <main className="flex h-screen bg-white dark:bg-gray-950">
       {/* Left Pane - Chat Interface */}
-      <div className="w-1/3 border-r border-gray-200 dark:border-gray-700">
+      <div className="w-1/2 border-r border-gray-200 dark:border-gray-700">
         {/* Pass selectedNote and refresh callback to ChatInterface */}
         <ChatInterface
           selectedNote={selectedNote}
@@ -32,7 +32,7 @@ export default function Home() {
       </div>
 
       {/* Middle Pane - Notes Area */}
-      <div className="w-1/3 border-r border-gray-200 dark:border-gray-700">
+      <div className="w-1/2 border-r border-gray-200 dark:border-gray-700">
         {/* Pass selectedNote and its setter to NotesArea */}
         <NotesArea
           ref={notesAreaRef}
@@ -41,10 +41,13 @@ export default function Home() {
         />
       </div>
 
-      {/* Right Pane - Visualization Area */}
-      <div className="w-1/3">
-        <VisualizationArea />
-      </div>
+      {/* Graph Link Overlay */}
+      <Link
+        href="/graph"
+        className="fixed bottom-4 right-4 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 shadow-lg transition-colors"
+      >
+        View Knowledge Graph
+      </Link>
     </main>
   );
 }
