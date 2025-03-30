@@ -1,1 +1,0 @@
-Simulated response to: "hi"

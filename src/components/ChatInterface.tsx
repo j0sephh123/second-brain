@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { PaperAirplaneIcon } from "@heroicons/react/24/solid";
 import Modal from "./Modal"; // Import the Modal component
 import { useToast } from "@/hooks/useToast";
@@ -378,9 +378,9 @@ export default function ChatInterface({
             <input
               type="text"
               id="newNoteName"
-              value={newNoteNameInput}
-              onChange={(e) => setNewNoteNameInput(e.target.value)}
-              placeholder="e.g., chat-summary.md"
+              value={newNoteNameInput.replace(/\.md$/, "")}
+              onChange={(e) => setNewNoteNameInput(e.target.value + ".md")}
+              placeholder="e.g., chat-summary"
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:text-gray-100"
             />
             {modalState.error && (

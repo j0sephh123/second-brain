@@ -9,15 +9,15 @@ import {
 } from "react";
 import {
   FolderIcon,
-  DocumentIcon,
   ArrowDownTrayIcon,
   PencilIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
-import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
 import path from "path";
 import { useToast } from "@/hooks/useToast";
+import ConfirmModal from "./ConfirmModal";
+import RenameModal from "./RenameModal";
+import NewNoteModal from "./NewNoteModal";
 
 interface FileNode {
   name: string;
@@ -41,8 +41,12 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
     const [fileTree, setFileTree] = useState<FileNode[]>([]);
     const [isLoadingTree, setIsLoadingTree] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-    const [isRenaming, setIsRenaming] = useState<string | null>(null);
-    const [newName, setNewName] = useState("");
+    const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+    const [noteToRename, setNoteToRename] = useState<{
+      path: string;
+      name: string;
+    } | null>(null);
+    const [isNewNoteModalOpen, setIsNewNoteModalOpen] = useState(false);
     const { toast } = useToast();
 
     const [editorContent, setEditorContent] = useState<string>("");
@@ -111,11 +115,10 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
       ) {
         return;
       }
-      const filename = window.prompt(
-        "Filename (e.g., my-note.md):",
-        "new-note.md"
-      );
-      if (!filename) return;
+      setIsNewNoteModalOpen(true);
+    };
+
+    const handleNewNoteConfirm = async (filename: string) => {
       try {
         const response = await fetch("/api/notes/create", {
           method: "POST",
@@ -128,12 +131,23 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         if (!response.ok) {
           throw new Error(result.error || `HTTP error! ${response.status}`);
         }
-        alert(`Note "${result.filename}" created.`);
+        toast({
+          title: "Success",
+          description: `Note "${result.filename}" created.`,
+        });
         await fetchFileTree();
         setSelectedNote(result.filename);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error creating note:", error);
-        alert(`Error creating note: ${error.message}`);
+        toast({
+          title: "Error",
+          description: `Error creating note: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          variant: "destructive",
+        });
+      } finally {
+        setIsNewNoteModalOpen(false);
       }
     };
 
@@ -179,9 +193,13 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         }
         alert("Note saved successfully!");
         setHasChanges(false);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error saving note:", error);
-        alert(`Error saving note: ${error.message}`);
+        alert(
+          `Error saving note: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       } finally {
         setIsSaving(false);
       }
@@ -200,8 +218,7 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         }
 
         await fetchFileTree();
-        setIsRenaming(null);
-        setNewName("");
+        setNoteToRename(null);
         toast({
           title: "Success",
           description: "Note renamed successfully",
@@ -216,16 +233,24 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
       }
     };
 
+    const handleConfirmRename = (newName: string) => {
+      if (!noteToRename) return;
+      const newPath = noteToRename.path.replace(/[^/]+$/, newName);
+      handleRename(noteToRename.path, newPath);
+    };
+
     const handleDelete = async (path: string) => {
-      if (!confirm("Are you sure you want to delete this note?")) {
-        return;
-      }
+      setNoteToDelete(path);
+    };
+
+    const handleConfirmDelete = async () => {
+      if (!noteToDelete) return;
 
       try {
         const response = await fetch("/api/notes/delete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path }),
+          body: JSON.stringify({ path: noteToDelete }),
         });
 
         if (!response.ok) {
@@ -233,13 +258,14 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         }
 
         await fetchFileTree();
-        if (selectedNote === path) {
+        if (selectedNote === noteToDelete) {
           setSelectedNote(null);
           setEditorContent("");
         }
         toast({
           title: "Success",
           description: "Note deleted successfully",
+          variant: "success",
         });
       } catch (error) {
         console.error("Error deleting note:", error);
@@ -248,6 +274,8 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
           description: "Failed to delete note",
           variant: "destructive",
         });
+      } finally {
+        setNoteToDelete(null);
       }
     };
 
@@ -276,58 +304,20 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
     };
 
     const renderNoteItem = (note: FileNode) => {
-      if (isRenaming === note.path) {
-        return (
-          <div className="flex items-center gap-2 w-full">
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  const newPath = note.path.replace(/[^/]+$/, newName);
-                  handleRename(note.path, newPath);
-                }
-              }}
-              className="flex-1 px-2 py-1 text-sm border rounded dark:bg-gray-700 dark:border-gray-600"
-              autoFocus
-            />
-            <button
-              onClick={() => {
-                const newPath = note.path.replace(/[^/]+$/, newName);
-                handleRename(note.path, newPath);
-              }}
-              className="text-sm text-blue-500 hover:text-blue-600"
-            >
-              Save
-            </button>
-            <button
-              onClick={() => {
-                setIsRenaming(null);
-                setNewName("");
-              }}
-              className="text-sm text-gray-500 hover:text-gray-600"
-            >
-              Cancel
-            </button>
-          </div>
-        );
-      }
-
+      const displayName = note.name.replace(/\.md$/, "");
       return (
         <div className="group flex items-center justify-between w-full">
           <button
             onClick={() => handleFileClick(note.path)}
             className="flex-1 text-left hover:text-blue-500 dark:hover:text-blue-400 text-sm"
           >
-            {note.name}
+            {displayName}
           </button>
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                setIsRenaming(note.path);
-                setNewName(note.name);
+                setNoteToRename({ path: note.path, name: note.name });
               }}
               className="p-1 text-gray-500 hover:text-blue-500 dark:text-gray-400 dark:hover:text-blue-400"
             >
@@ -352,9 +342,6 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
         {/* File Tree */}
         <div className="w-1/3 border-r border-gray-200 dark:border-gray-700 overflow-y-auto p-4 flex flex-col">
           <div className="flex items-center justify-between mb-4 flex-shrink-0">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-              Notes
-            </h2>
             <button
               onClick={handleCreateNewNote}
               className="text-sm bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 disabled:opacity-50"
@@ -387,7 +374,7 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
                   className="text-lg font-medium text-gray-800 dark:text-gray-200 truncate"
                   title={selectedNote}
                 >
-                  {path.basename(selectedNote)}
+                  {path.basename(selectedNote).replace(/\.md$/, "")}
                 </h3>
                 <button
                   onClick={handleSaveNote}
@@ -416,9 +403,37 @@ const NotesArea = forwardRef<NotesAreaRef, NotesAreaProps>(
             </div>
           )}
         </div>
+
+        {/* Delete Confirmation Modal */}
+        <ConfirmModal
+          isOpen={noteToDelete !== null}
+          onClose={() => setNoteToDelete(null)}
+          onConfirm={handleConfirmDelete}
+          title="Delete Note"
+          message="Are you sure you want to delete this note? This action cannot be undone."
+          confirmText="Delete"
+          cancelText="Cancel"
+        />
+
+        {/* Rename Modal */}
+        <RenameModal
+          isOpen={noteToRename !== null}
+          onClose={() => setNoteToRename(null)}
+          onConfirm={handleConfirmRename}
+          currentName={noteToRename?.name || ""}
+        />
+
+        {/* New Note Modal */}
+        <NewNoteModal
+          isOpen={isNewNoteModalOpen}
+          onClose={() => setIsNewNoteModalOpen(false)}
+          onConfirm={handleNewNoteConfirm}
+        />
       </div>
     );
   }
 );
+
+NotesArea.displayName = "NotesArea";
 
 export default NotesArea;
