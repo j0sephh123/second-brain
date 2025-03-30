@@ -44,7 +44,12 @@ function validateNotePath(relativePath: string): string {
 
 export async function POST(request: Request) {
   try {
-    let body: { filename: unknown; content: unknown };
+    // Add action to the expected body type, make it optional
+    let body: {
+      filename: unknown;
+      content: unknown;
+      action?: "append" | "overwrite";
+    };
     try {
       body = await request.json();
     } catch (e) {
@@ -65,6 +70,9 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
+    // Determine action, default to overwrite
+    const action = body.action === "append" ? "append" : "overwrite";
 
     // Validate the path - use the NEW function and assign to validatedFilePath
     let validatedFilePath: string;
@@ -89,10 +97,22 @@ export async function POST(request: Request) {
       // If directory check fails (ENOENT), it implies an issue unless we create dirs.
       console.error(`Directory access error for '${dirOfFile}':`, e.code);
       if (e.code === "ENOENT") {
-        return NextResponse.json(
-          { error: "Parent directory not found" },
-          { status: 404 }
-        );
+        if (action === "overwrite") {
+          // Allow creating file in root notes dir even if it didn't exist before
+          if (dirOfFile !== notesDir) {
+            return NextResponse.json(
+              { error: "Parent directory not found" },
+              { status: 404 }
+            );
+          }
+          // If it's the root, writeFile will create it.
+        } else {
+          // action === 'append'
+          return NextResponse.json(
+            { error: "Parent directory not found for append" },
+            { status: 404 }
+          );
+        }
       }
       return NextResponse.json(
         { error: "Cannot access file path" },
@@ -100,22 +120,66 @@ export async function POST(request: Request) {
       );
     }
 
-    // Write (overwrite) the file content
-    await fs.writeFile(validatedFilePath, body.content, "utf-8"); // Use writeFile
+    // --- Perform action ---
+    let successMessage = "";
 
-    return NextResponse.json({ message: "Note saved successfully" });
+    if (action === "append") {
+      // For append, we MUST check if the file exists first
+      try {
+        const stats = await fs.stat(validatedFilePath);
+        if (!stats.isFile()) {
+          return NextResponse.json(
+            { error: "Target path is not a file (cannot append)" },
+            { status: 400 }
+          );
+        }
+      } catch (e: any) {
+        if (e.code === "ENOENT") {
+          return NextResponse.json(
+            { error: "File not found (cannot append)" },
+            { status: 404 }
+          );
+        }
+        console.error(
+          `File access/stat error for APPEND '${validatedFilePath}':`,
+          e.code
+        );
+        return NextResponse.json(
+          { error: "File not found or inaccessible for append" },
+          { status: 404 }
+        );
+      }
+
+      // Append the content (add a newline before the new content)
+      const contentToAppend = `\n${body.content}`;
+      await fs.appendFile(validatedFilePath, contentToAppend, "utf-8");
+      successMessage = "Content appended successfully";
+    } else {
+      // action === 'overwrite'
+      // Write (overwrite) the file content
+      await fs.writeFile(validatedFilePath, body.content, "utf-8"); // Use writeFile
+      successMessage = "Note saved successfully (overwritten)";
+    }
+
+    return NextResponse.json({ message: successMessage });
   } catch (error: any) {
-    console.error("Error saving note:", error);
+    console.error(
+      `Error during ${body?.action || "save"} note operation:`,
+      error
+    );
     if (error.code === "EACCES") {
       return NextResponse.json({ error: "Permission denied" }, { status: 500 });
     }
     // ENOENT might still happen if the directory check fails unexpectedly
     if (error.code === "ENOENT") {
       return NextResponse.json(
-        { error: "File or directory not found during write" },
+        { error: "File or directory not found during write/append" },
         { status: 404 }
       );
     }
-    return NextResponse.json({ error: "Failed to save note" }, { status: 500 });
+    return NextResponse.json(
+      { error: `Failed to ${body?.action || "save"} note` },
+      { status: 500 }
+    );
   }
 }

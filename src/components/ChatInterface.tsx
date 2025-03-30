@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { PaperAirplaneIcon } from "@heroicons/react/24/solid";
+import Modal from "./Modal"; // Import the Modal component
+import { useToast } from "@/hooks/useToast";
 
 // Interface for a single message
 interface Message {
@@ -26,11 +28,28 @@ interface BranchTree {
 
 interface ChatInterfaceProps {
   selectedNote: string | null; // Receive selected note from parent
+  onNoteCreated?: () => void; // Callback to refresh notes list
+  onNoteUpdated?: (path: string) => void; // Callback to refresh note content
+}
+
+// --- Modal State Types --- //
+type ModalStep = "initial" | "newFileName" | "confirmOverwrite";
+interface ModalState {
+  isOpen: boolean;
+  step: ModalStep;
+  messageToSave: Message | null;
+  error?: string;
+  fileNameToConfirm?: string;
 }
 
 // --- Component --- //
 
-export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
+export default function ChatInterface({
+  selectedNote,
+  onNoteCreated,
+  onNoteUpdated,
+}: ChatInterfaceProps) {
+  const { toast } = useToast();
   // State: All message branches
   const [chatBranches, setChatBranches] = useState<ChatBranches>({ root: [] });
   // State: ID of the currently active/displayed branch
@@ -41,6 +60,17 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
   const [branchCounter, setBranchCounter] = useState(0);
   // State: User input
   const [input, setInput] = useState("");
+  // State: Loading state for save
+  const [isSavingToNote, setIsSavingToNote] = useState(false);
+
+  // New Modal State
+  const [modalState, setModalState] = useState<ModalState>({
+    isOpen: false,
+    step: "initial",
+    messageToSave: null,
+  });
+  // State for the new filename input in the modal
+  const [newNoteNameInput, setNewNoteNameInput] = useState("");
 
   // --- Event Handlers --- //
 
@@ -128,36 +158,59 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
     // Future improvement: Could add visual indication of switching branches
   };
 
-  // Updated handler for Save to Notes
-  const handleSaveToNotesClick = async (messageId: string) => {
-    // 1. Check if a note is selected
-    if (!selectedNote) {
-      alert("Please select a note in the middle pane first.");
-      return;
-    }
+  // --- Save to Note Modal Logic --- //
 
-    // 2. Find the message content
+  // 1. Open Modal Initial Step
+  const openSaveNoteModal = (messageId: string) => {
     const currentMessages = chatBranches[currentBranchId] || [];
     const messageToSave = currentMessages.find((msg) => msg.id === messageId);
-
     if (!messageToSave) {
-      console.error("Message not found for saving.");
-      alert("Error: Could not find message content.");
+      toast({
+        title: "Error",
+        description: "Could not find message content.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setModalState({ isOpen: true, step: "initial", messageToSave });
+    setNewNoteNameInput(""); // Reset input
+  };
+
+  // 2. Close Modal
+  const closeModal = () => {
+    setModalState({
+      isOpen: false,
+      step: "initial",
+      messageToSave: null,
+      error: undefined,
+    });
+    setIsSavingToNote(false); // Ensure loading state is reset
+  };
+
+  // 3. Proceed with Save Action (called from modal buttons)
+  const proceedWithSave = async (
+    action: "append" | "overwrite",
+    targetFilename: string | null
+  ) => {
+    if (!modalState.messageToSave || !targetFilename) {
+      setModalState((prev) => ({
+        ...prev,
+        error: "Missing message or filename.",
+      }));
       return;
     }
 
-    const contentToAppend = messageToSave.content;
+    setIsSavingToNote(true);
+    setModalState((prev) => ({ ...prev, error: undefined })); // Clear previous errors
 
-    // 3. Call the API
     try {
       const response = await fetch("/api/notes/update", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          filename: selectedNote, // Use the selected note filename
-          content: contentToAppend,
+          filename: targetFilename,
+          content: modalState.messageToSave.content,
+          action: action,
         }),
       });
 
@@ -165,17 +218,136 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
 
       if (!response.ok) {
         throw new Error(
-          result.error || `HTTP error! status: ${response.status}`
+          result.error || `API error! status: ${response.status}`
         );
       }
 
-      console.log("Successfully appended content to note:", selectedNote);
-      alert(`Content saved to ${selectedNote}`);
-      // Optional: Trigger refresh of NotesArea content if needed,
-      // but appendFile doesn't usually require UI refresh unless viewing the file.
-    } catch (error: any) {
-      console.error("Error saving to note:", error);
-      alert(`Error saving to note: ${error.message}`);
+      toast({
+        title: "Success",
+        description: `${result.message} in ${targetFilename}`,
+      });
+      closeModal(); // Close modal on success
+
+      // Call the refresh callbacks if they exist
+      if (onNoteCreated) {
+        onNoteCreated();
+      }
+      if (onNoteUpdated) {
+        onNoteUpdated(targetFilename);
+      }
+    } catch (error: unknown) {
+      console.error("Error saving note:", error);
+      // Display error within the modal
+      setModalState((prev) => ({
+        ...prev,
+        error:
+          error instanceof Error ? error.message : "An unknown error occurred",
+      }));
+    } finally {
+      setIsSavingToNote(false);
+    }
+  };
+
+  // 4. Handle Creating a New Note (from modal)
+  const handleCreateNewNoteAndSave = async () => {
+    if (!newNoteNameInput || newNoteNameInput.trim() === "") {
+      setModalState((prev) => ({
+        ...prev,
+        error: "New filename cannot be empty",
+      }));
+      return;
+    }
+    if (!modalState.messageToSave) return;
+
+    setIsSavingToNote(true);
+    setModalState((prev) => ({ ...prev, error: undefined }));
+
+    let targetFilename = newNoteNameInput; // API will sanitize
+
+    try {
+      // Call create first
+      const createResponse = await fetch("/api/notes/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: targetFilename }),
+      });
+      const createResult = await createResponse.json();
+
+      if (!createResponse.ok) {
+        if (createResponse.status === 409) {
+          // File exists, need to confirm overwrite in the modal
+          setModalState((prev) => ({
+            ...prev,
+            step: "confirmOverwrite",
+            fileNameToConfirm: createResult.filename || targetFilename,
+          }));
+          // Don't proceed further until confirmed
+          setIsSavingToNote(false);
+          return;
+        } else {
+          throw new Error(createResult.error || "Failed to prepare new note");
+        }
+      }
+
+      targetFilename = createResult.filename; // Use sanitized name
+      // File created, now overwrite it with content
+      await proceedWithSave("overwrite", targetFilename);
+    } catch (error: unknown) {
+      console.error("Error during new note creation/saving:", error);
+      setModalState((prev) => ({
+        ...prev,
+        error:
+          error instanceof Error ? error.message : "An unknown error occurred",
+      }));
+      setIsSavingToNote(false);
+    }
+  };
+
+  // 5. Handle confirmed overwrite (from modal)
+  const handleConfirmOverwrite = async () => {
+    if (!modalState.fileNameToConfirm) {
+      setModalState((prev) => ({
+        ...prev,
+        error: "Cannot determine filename to overwrite.",
+      }));
+      return;
+    }
+
+    setIsSavingToNote(true);
+    try {
+      // Call create first to ensure the file exists
+      const createResponse = await fetch("/api/notes/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: modalState.fileNameToConfirm }),
+      });
+      const createResult = await createResponse.json();
+
+      if (!createResponse.ok) {
+        throw new Error(
+          createResult.error || "Failed to prepare note for overwrite"
+        );
+      }
+
+      // Now proceed with the overwrite
+      await proceedWithSave(
+        "overwrite",
+        createResult.filename || modalState.fileNameToConfirm
+      );
+
+      // Call the refresh callback if it exists
+      if (onNoteCreated) {
+        onNoteCreated();
+      }
+    } catch (error: unknown) {
+      console.error("Error during note overwrite:", error);
+      setModalState((prev) => ({
+        ...prev,
+        error:
+          error instanceof Error ? error.message : "An unknown error occurred",
+      }));
+    } finally {
+      setIsSavingToNote(false);
     }
   };
 
@@ -191,6 +363,151 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
   // Get a list of all available branch IDs
   const availableBranchIds = Object.keys(chatBranches);
 
+  // --- Modal Content Rendering --- //
+  const renderModalContent = () => {
+    switch (modalState.step) {
+      case "newFileName":
+        return (
+          <div>
+            <label
+              htmlFor="newNoteName"
+              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+            >
+              Enter filename for new note:
+            </label>
+            <input
+              type="text"
+              id="newNoteName"
+              value={newNoteNameInput}
+              onChange={(e) => setNewNoteNameInput(e.target.value)}
+              placeholder="e.g., chat-summary.md"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:text-gray-100"
+            />
+            {modalState.error && (
+              <p className="text-red-500 text-sm mt-2">
+                Error: {modalState.error}
+              </p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={closeModal}
+                className="px-4 py-2 text-sm rounded bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-800 dark:text-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateNewNoteAndSave}
+                disabled={isSavingToNote}
+                className="px-4 py-2 text-sm rounded bg-blue-500 hover:bg-blue-600 text-white disabled:opacity-50"
+              >
+                {isSavingToNote ? "Creating..." : "Create & Save"}
+              </button>
+            </div>
+          </div>
+        );
+      case "confirmOverwrite":
+        return (
+          <div>
+            <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
+              Note named{" "}
+              <strong className="font-semibold">
+                {modalState.fileNameToConfirm || "this file"}
+              </strong>{" "}
+              already exists. Do you want to overwrite it with the chat message
+              content?
+            </p>
+            {modalState.error && (
+              <p className="text-red-500 text-sm mt-2">
+                Error: {modalState.error}
+              </p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() =>
+                  setModalState((prev) => ({
+                    ...prev,
+                    step: "newFileName",
+                    error: undefined,
+                  }))
+                }
+                className="px-4 py-2 text-sm rounded bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-800 dark:text-gray-100"
+              >
+                Choose Different Name
+              </button>
+              <button
+                onClick={handleConfirmOverwrite}
+                disabled={isSavingToNote}
+                className="px-4 py-2 text-sm rounded bg-red-500 hover:bg-red-600 text-white disabled:opacity-50"
+              >
+                {isSavingToNote ? "Overwriting..." : "Yes, Overwrite"}
+              </button>
+            </div>
+          </div>
+        );
+      case "initial":
+      default:
+        return (
+          <div>
+            <p className="text-sm text-gray-700 dark:text-gray-300 mb-4">
+              Where would you like to save this message?
+            </p>
+            {modalState.error && (
+              <p className="text-red-500 text-sm mb-2">
+                Error: {modalState.error}
+              </p>
+            )}
+            <div className="space-y-2">
+              <button
+                onClick={() => proceedWithSave("append", selectedNote)}
+                disabled={!selectedNote || isSavingToNote}
+                title={
+                  !selectedNote
+                    ? "Select a note first"
+                    : "Append to end of selected note"
+                }
+                className="w-full px-4 py-2 text-sm text-left rounded bg-blue-500 hover:bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Append to: {selectedNote || "(No Note Selected)"}
+              </button>
+              <button
+                onClick={() => proceedWithSave("overwrite", selectedNote)}
+                disabled={!selectedNote || isSavingToNote}
+                title={
+                  !selectedNote
+                    ? "Select a note first"
+                    : "Overwrite entire selected note"
+                }
+                className="w-full px-4 py-2 text-sm text-left rounded bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Overwrite: {selectedNote || "(No Note Selected)"}
+              </button>
+              <button
+                onClick={() =>
+                  setModalState((prev) => ({
+                    ...prev,
+                    step: "newFileName",
+                    error: undefined,
+                  }))
+                }
+                disabled={isSavingToNote}
+                className="w-full px-4 py-2 text-sm text-left rounded bg-green-500 hover:bg-green-600 text-white disabled:opacity-50"
+              >
+                Save to New Note...
+              </button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={closeModal}
+                className="px-4 py-2 text-sm rounded bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-800 dark:text-gray-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        );
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-900">
       {/* Header with Branch Selector */}
@@ -199,7 +516,8 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
         <select
           value={currentBranchId}
           onChange={handleBranchSwitch}
-          className="ml-2 p-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+          disabled={isSavingToNote} // Disable branch switch during save
+          className="ml-2 p-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
         >
           {availableBranchIds.map((branchId) => (
             <option key={branchId} value={branchId}>
@@ -229,26 +547,27 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
               {message.isAI && (
                 <div className="mt-2 flex gap-2">
                   <button
-                    onClick={() => handleBranchClick(message.id)} // Use the new handler
-                    className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    onClick={() => handleBranchClick(message.id)}
+                    disabled={isSavingToNote} // Disable branching during save
+                    className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
                   >
                     Branch from this
                   </button>
                   <button
-                    onClick={() => handleSaveToNotesClick(message.id)}
-                    disabled={!selectedNote} // Disable if no note is selected
+                    onClick={() => openSaveNoteModal(message.id)} // Open the modal instead
+                    disabled={isSavingToNote}
                     className={`text-xs px-2 py-1 rounded focus:outline-none focus:ring-2 focus:ring-green-400 ${
-                      !selectedNote
-                        ? "bg-gray-400 dark:bg-gray-600 text-gray-700 dark:text-gray-400 cursor-not-allowed"
+                      isSavingToNote
+                        ? "bg-gray-400 dark:bg-gray-600 text-gray-700 dark:text-gray-400 cursor-wait"
                         : "bg-green-500 dark:bg-green-600 text-white hover:bg-green-600 dark:hover:bg-green-700"
                     }`}
                     title={
-                      !selectedNote
-                        ? "Select a note first"
-                        : "Save this message to the selected note"
+                      isSavingToNote
+                        ? "Saving..."
+                        : "Save this message to a note"
                     }
                   >
-                    Save to Notes
+                    {isSavingToNote ? "Saving..." : "Save to Notes"}
                   </button>
                 </div>
               )}
@@ -268,16 +587,27 @@ export default function ChatInterface({ selectedNote }: ChatInterfaceProps) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type your message..."
-            className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+            disabled={isSavingToNote} // Disable input during save
+            className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
           />
           <button
             type="submit"
-            className="bg-blue-500 text-white rounded-lg px-4 py-2 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400"
+            disabled={isSavingToNote} // Disable send during save
+            className="bg-blue-500 text-white rounded-lg px-4 py-2 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 disabled:opacity-50"
           >
             <PaperAirplaneIcon className="h-5 w-5" />
           </button>
         </div>
       </form>
+
+      {/* Render the Modal */}
+      <Modal
+        isOpen={modalState.isOpen}
+        onClose={closeModal}
+        title="Save Message to Note"
+      >
+        {renderModalContent()}
+      </Modal>
     </div>
   );
 }
